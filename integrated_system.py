@@ -6,15 +6,185 @@
 融合两个系统的优势：
 - 我们的系统：新闻抓取 → 产业链分析 → 智能选股 → 低价股筛选
 - TradingAgents：7位分析师辩论 → Bull/Bear多空辩论 → 最终Buy/Hold/Sell信号
+
+动态行业机制：
+- 自动从实时新闻中识别热门行业
+- 根据新闻热度动态调整产业链
+- 不再写死9大行业
 """
 import os
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
+from collections import Counter
+
+# 导入新闻模块获取实时新闻
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from finance_news_system import FinanceNewsSystem, EventClassifier
 
 # ==================== 配置 ====================
 OUTPUT_DIR = r'D:\finance_reports'
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
+
+# ==================== 动态行业检测 ====================
+
+def detect_industries_from_market():
+    """从东方财富行业涨跌榜实时获取热门行业"""
+    print('正在从市场数据中检测热门行业...')
+    import requests
+
+    HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    }
+
+    try:
+        url = 'https://push2.eastmoney.com/api/qt/clist/get'
+        params = {
+            'fid': 'f62',
+            'po': '1',
+            'pz': '100',
+            'pn': '1',
+            'np': '1',
+            'fltt': '2',
+            'invt': '2',
+            'ut': 'b2884a393a59ad64002216a310ad0843',
+            'fields': 'f12,f14,f2,f3,f4,f5,f6,f7,f8',
+            'fs': 'm:90+t:2+f:!50'
+        }
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
+        data = resp.json()
+
+        industries = []
+        if data.get('data') and data['data'].get('diff'):
+            for item in data['data']['diff']:
+                name = item.get('f14', '')
+                change = item.get('f3', 0)
+                industries.append({'name': name, 'change': change})
+
+        # 按涨幅排序，取前10
+        industries.sort(key=lambda x: x['change'], reverse=True)
+
+        # 提取行业名称
+        hot_industries = [ind['name'] for ind in industries[:10]]
+        print(f'市场热门行业: {hot_industries[:6]}')
+        return hot_industries[:6]
+
+    except Exception as e:
+        print(f'获取行业数据失败: {e}')
+        return []
+
+
+def map_market_industry_to_chain(market_industry):
+    """将市场行业名称映射到产业链"""
+    # 市场行业 -> 我们的行业链
+    mapping = {
+        '半导体': '半导体',
+        '通信设备': 'AI算力',
+        '通信': 'AI算力',
+        '电子元件': '半导体',
+        '电子信息': '科技',
+        '软件服务': '科技',
+        '互联网': '科技',
+        '光伏设备': '光伏',
+        '风电设备': '电力',
+        '水电': '电力',
+        '火电': '电力',
+        '电网设备': '电力',
+        '特高压': '电力',
+        '汽车整车': '新能源车',
+        '汽车零部件': '新能源车',
+        '锂电池': '新能源车',
+        '银行': '金融',
+        '证券': '金融',
+        '保险': '金融',
+        '多元金融': '金融',
+        '白酒': '消费',
+        '食品饮料': '消费',
+        '家电': '消费',
+        '房地产': '地产',
+        '军工': '军工',
+        '化学制药': '医药',
+        '生物制药': '医药',
+        '医疗器械': '医药',
+    }
+
+    # 模糊匹配
+    for key, value in mapping.items():
+        if key in market_industry or market_industry in key:
+            return value
+
+    # 返回原始名称
+    return market_industry if len(market_industry) < 6 else None
+
+
+def get_dynamic_industries():
+    """获取动态行业列表 - 基于市场涨跌"""
+    market_industries = detect_industries_from_market()
+
+    # 映射为我们的行业
+    mapped = []
+    for ind in market_industries:
+        mapped_ind = map_market_industry_to_chain(ind)
+        if mapped_ind and mapped_ind not in mapped:
+            mapped.append(mapped_ind)
+
+    # 如果不够6个，补充默认行业（不含医药）
+    if len(mapped) < 4:
+        defaults = ['新能源车', 'AI算力', '电力', '半导体', '消费', '金融']
+        for d in defaults:
+            if d not in mapped:
+                mapped.append(d)
+
+    return mapped[:6]
+
+
+def build_dynamic_chains(industries):
+    """根据动态行业构建产业链"""
+    dynamic_chains = {}
+    for industry in industries:
+        if industry in INDUSTRY_CHAINS:
+            dynamic_chains[industry] = INDUSTRY_CHAINS[industry]
+        elif industry == '消费' and '消费' not in dynamic_chains:
+            dynamic_chains['消费'] = {
+                'desc': '消费产业链',
+                '全链图': '''
+消费产业链
+├── 上游：原材料
+│   └── 农产品：北大荒
+├── 中游：生产制造
+│   ├── 白酒：贵州茅台、五粮液、洋河股份
+│   ├── 家电：美的集团、海尔智家
+│   └── 食品：伊利股份、海天味业
+└── 下游：渠道
+    └── 电商/超市：京东、阿里、永辉超市
+''',
+                '投资逻辑': '高端消费护城河，大众消费复苏'
+            }
+        elif industry == '金融' and '金融' not in dynamic_chains:
+            dynamic_chains['金融'] = {
+                'desc': '金融产业链',
+                '全链图': '''
+金融产业链
+├── 上游：资金来源
+│   └── 居民/企业存款
+├── 中游：金融机构
+│   ├── 银行：招商银行、宁波银行、工商银行
+│   ├── 券商：中信证券、东方财富、华泰证券
+│   └── 保险：中国平安、中国人寿
+└── 下游：服务对象
+    └── 企业/个人用户
+''',
+                '投资逻辑': '银行低估值高分红，券商弹性最大'
+            }
+
+    # 补充默认行业
+    for ind in ['新能源车', 'AI算力', '电力', '半导体']:
+        if ind not in dynamic_chains and len(dynamic_chains) < 6:
+            if ind in INDUSTRY_CHAINS:
+                dynamic_chains[ind] = INDUSTRY_CHAINS[ind]
+
+    return dynamic_chains
+
 
 # ==================== 产业链全景图 ====================
 INDUSTRY_CHAINS = {
@@ -391,14 +561,14 @@ def generate_trading_agents_prompt(stocks):
     return prompt
 
 
-def print_chain_diagrams():
+def print_chain_diagrams(dynamic_chains):
     """打印产业链全景图"""
     print('=' * 80)
-    print('  产业链全景图')
+    print('  产业链全景图 (动态生成)')
     print('=' * 80)
     print()
 
-    for industry, data in INDUSTRY_CHAINS.items():
+    for industry, data in dynamic_chains.items():
         print(f'【{industry}】{data["desc"]}')
         print('-' * 60)
         print(data['全链图'])
@@ -406,10 +576,10 @@ def print_chain_diagrams():
         print()
 
 
-def analyze_stocks():
-    """分析股票并生成排名"""
+def analyze_stocks_by_industries(industries):
+    """根据动态行业分析股票并生成排名"""
     print('=' * 80)
-    print('  行业股票分析 (0-30元)')
+    print(f'  行业股票分析 (0-30元) - 动态行业: {industries}')
     print('=' * 80)
     print()
 
@@ -421,22 +591,20 @@ def analyze_stocks():
 
     results.sort(key=lambda x: x[2], reverse=True)
 
-    industries = ['新能源车', 'AI算力', '电力', '光伏', '医药', '半导体', '银行', '券商']
-
     for ind in industries:
         print(f'\n### {ind}')
         print('|' + '-'*20 + '|' + '-'*8 + '|' + '-'*6 + '|' + '-'*6 + '|' + '-'*8 + '|' + '-'*10 + '|' + '-'*6 + '|')
         print('| 股票 | 价格 | PE | ROE | 增长 | 行业 | 评分 |')
         print('|' + '-'*20 + '|' + '-'*8 + '|' + '-'*6 + '|' + '-'*6 + '|' + '-'*8 + '|' + '-'*10 + '|' + '-'*6 + '|')
 
-        ind_stocks = [(s, d, sc) for s, d, sc in results if ind in d['industry']]
+        ind_stocks = [(s, d, sc) for s, d, sc in results if ind in d['industry'] or ind.replace('AI算力', '科技') in d['industry']]
         for stock, data, score in ind_stocks[:10]:
             print(f'| {stock} | {data["price"]:.1f} | {data["pe"]} | {data["roe"]}% | {data["rev_growth"]}% | {data["industry"]} | {score:.1f} |')
 
     return results
 
 
-def generate_final_report(results):
+def generate_final_report(results, dynamic_chains):
     """生成最终投资报告"""
     print('=' * 80)
     print('  最终投资建议报告')
@@ -469,14 +637,22 @@ def generate_final_report(results):
     print()
     print('| 产业 | 配置逻辑 | 推荐标的 |')
     print('|------|---------|---------|')
-    print('| 新能源车上游 | 锂价反弹，矿产为王 | 天齐锂业、赣锋锂业 |')
-    print('| AI算力 | 算力爆发，电力先行 | 中天科技、亨通光电、特变电工 |')
-    print('| 电力 | 稳定高分红，新能源转型 | 长江电力、三峡能源 |')
-    print('| 光伏 | 周期底部，龙头份额提升 | 通威股份、晶科能源 |')
-    print('| 医药 | 估值历史低位，创新出海 | 康龙化成、乐普医疗 |')
-    print('| 半导体 | 国产替代，设备先行 | 长电科技、华天科技 |')
-    print('| 银行 | 低估值高分红，防御性强 | 招商银行、南京银行 |')
-    print('| 券商 | 市场回暖，弹性最大 | 东方财富、中信证券 |')
+
+    # 根据动态行业生成配置建议
+    config_map = {
+        '新能源车': ('锂价反弹，矿产为王', '天齐锂业、赣锋锂业'),
+        'AI算力': ('算力爆发，电力先行', '中天科技、亨通光电、特变电工'),
+        '电力': ('稳定高分红，新能源转型', '长江电力、三峡能源'),
+        '光伏': ('周期底部，龙头份额提升', '通威股份、晶科能源'),
+        '半导体': ('国产替代，设备先行', '长电科技、华天科技'),
+        '消费': ('高端消费复苏，大众消费反弹', '贵州茅台、美的集团'),
+        '金融': ('低估值高分红，防御性强', '招商银行、东方财富'),
+    }
+
+    for industry in list(dynamic_chains.keys())[:6]:
+        if industry in config_map:
+            logic, stocks = config_map[industry]
+            print(f'| {industry} | {logic} | {stocks} |')
 
     return top[:10]
 
@@ -506,14 +682,20 @@ def main():
     print('=' * 80)
     print()
 
-    # 1. 打印产业链全景图
-    print_chain_diagrams()
+    # 0. 动态获取行业
+    industries = get_dynamic_industries()
 
-    # 2. 股票分析
-    results = analyze_stocks()
+    # 0.5 根据动态行业构建产业链
+    dynamic_chains = build_dynamic_chains(industries)
+
+    # 1. 打印产业链全景图
+    print_chain_diagrams(dynamic_chains)
+
+    # 2. 股票分析（只分析动态检测到的行业）
+    results = analyze_stocks_by_industries(industries)
 
     # 3. 生成最终报告
-    top_stocks = generate_final_report(results)
+    top_stocks = generate_final_report(results, dynamic_chains)
 
     # 4. 生成TradingAgents评审Prompt
     print()
