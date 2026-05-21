@@ -1,15 +1,30 @@
 """
 财经晨/晚间新闻投资分析系统
 结合央视新闻、国内外事件，自动分析生成投资策略报告
+使用Scrapling和Playwright从网站直接爬取
 """
-import requests
 import json
-import csv
 import os
 import re
 import time
 from datetime import datetime, timedelta
 from collections import defaultdict
+
+try:
+    from scrapling.fetchers import Fetcher, StealthyFetcher
+    HAS_SCRAPLING = True
+except ImportError:
+    print("请安装scrapling: pip install scrapling")
+    HAS_SCRAPLING = False
+    Fetcher = None
+    StealthyFetcher = None
+
+try:
+    from playwright.sync_api import sync_playwright
+    HAS_PLAYWRIGHT = True
+except ImportError:
+    print("请安装playwright: pip install playwright && python -m playwright install chromium")
+    HAS_PLAYWRIGHT = False
 
 # ============== 配置 ==============
 OUTPUT_DIR = r'D:\finance_reports'
@@ -40,102 +55,135 @@ class CCTVNewsFetcher:
 
 
 class EastMoneyNewsFetcher:
-    """东方财富新闻爬虫"""
+    """东方财富新闻爬虫 - 使用Scrapling"""
 
     def __init__(self):
         self.name = "东方财富"
-        self.base_url = 'https://np-anotice-stock.eastmoney.com'
 
     def get_important_news(self, days=1):
-        """获取重要新闻(近N天)"""
+        """获取重要新闻"""
         news_list = []
-        page = 1
+        if not HAS_SCRAPLING:
+            return news_list
 
-        while len(news_list) < 100:
-            try:
-                url = 'https://np-anotice-stock.eastmoney.com/api/security/ann'
-                params = {
-                    'sr': -1,
-                    'page': page,
-                    'pageSize': 50,
-                    'type': ['015001001', '015001002', '015001003'],
-                    'code': '',
-                    'org': '1',
-                    'source': 'web'
-                }
-                resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
-                data = resp.json()
-                items = data.get('data', {}).get('list', [])
+        try:
+            page_data = Fetcher.get('https://www.eastmoney.com/')
 
-                if not items:
+            # 尝试多个选择器
+            selectors = ['h3 a', '.news a', 'a[href*="news"]']
+            for selector in selectors:
+                items = page_data.css(selector)
+                for item in items:
+                    text = item.get_all_text().strip()
+                    href = item.attrib.get('href', '')
+                    # 过滤有效新闻链接
+                    if text and len(text) > 10 and href and 'news' in href:
+                        news_list.append({
+                            'title': text,
+                            'time': '',
+                            'source': '东方财富',
+                            'url': href
+                        })
+                if len(news_list) > 10:
                     break
 
-                news_list.extend(items)
-                page += 1
-                time.sleep(0.3)
-            except Exception as e:
-                print(f'获取失败: {e}')
-                break
+            # 如果上面没找到，尝试从页面文本中提取
+            if len(news_list) < 5:
+                body = page_data.css('body')
+                if body:
+                    text = body[0].get_all_text()
+                    import re
+                    # 提取新闻标题模式
+                    titles = re.findall(r'[一-龥]{8,30}', text)
+                    for title in titles[:20]:
+                        if any(kw in title for kw in ['涨', '跌', '利好', '利空', '政策', '行业', '公司', '市场']):
+                            news_list.append({
+                                'title': title,
+                                'time': '',
+                                'source': '东方财富',
+                                'url': ''
+                            })
 
+            return news_list[:50]
+        except Exception as e:
+            print(f'东方财富获取失败: {e}')
         return news_list
 
     def parse_news(self, item):
         return {
             'title': item.get('title', ''),
-            'time': item.get('notice_date', ''),
-            'source': '东方财富',
-            'type': item.get('art_type', ''),
-            'url': item.get('art_url', '')
+            'time': item.get('time', item.get('notice_date', '')),
+            'source': '东方财富'
         }
 
 
 class CLSNewsFetcher:
-    """财联社新闻爬虫"""
+    """财联社新闻爬虫 - 使用Scrapling"""
 
     def __init__(self):
         self.name = "财联社"
-        self.api_url = 'https://www.cls.cn/api/sw'
 
     def get_telegraph(self, page=1):
         """获取财联社电报"""
+        news_list = []
+        if not HAS_SCRAPLING:
+            return news_list
+
         try:
-            url = 'https://www.cls.cn/nodeapi/updateTelegraph'
-            params = {
-                'app': 'Cailianpress',
-                'os': 'web',
-                'sv': '8.4.1',
-                'page': page,
-                'rn': 20,
-                'type': '1',  # 1-电报 2-快讯
-                'hasFirstVipArticle': '0'
-            }
-            resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
-            data = resp.json()
-            return data.get('data', {}).get('roll_data', [])
+            page_data = Fetcher.get('https://www.cls.cn/telegraph')
+
+            # 查找所有包含标题格式的内容
+            body = page_data.css('body')
+            if body:
+                text = body[0].get_all_text()
+                lines = text.split('\n')
+
+                for line in lines:
+                    line = line.strip()
+                    # 财联社电报格式通常是【标题】内容
+                    if line and len(line) > 15 and '【' in line:
+                        match = re.search(r'【(.+?)】', line)
+                        if match:
+                            title = match.group(1)
+                            if len(title) > 5:
+                                news_list.append({
+                                    'roll_content': line[:150],
+                                    'ctime': ''
+                                })
+
+            return news_list[:30]
         except Exception as e:
             print(f'财联社获取失败: {e}')
-            return []
+        return news_list
 
 
 class SinaNewsFetcher:
-    """新浪财经新闻"""
+    """新浪财经新闻 - 使用Scrapling"""
 
     def __init__(self):
         self.name = "新浪财经"
 
     def get_finance_headlines(self):
         """获取财经头条"""
+        news_list = []
+        if not HAS_SCRAPLING:
+            return news_list
+
         try:
-            url = 'https://feed.mix.sina.com.cn/api/proxy/get'
-            params = {
-                'page': 1,
-                'size': 30,
-                'channel': 'finance',
-                'id': 'finance'
-            }
-            resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
-            data = resp.json()
-            return data.get('result', {}).get('data', [])
+            page_data = Fetcher.get('https://finance.sina.com.cn/')
+
+            items = page_data.css('h3 a')
+            for item in items:
+                title = item.get_all_text()
+                if title and len(title.strip()) > 5:
+                    news_list.append({
+                        'title': title.strip(),
+                        'ctime': '',
+                        'channelname': '新浪财经',
+                        'url': ''
+                    })
+
+            return news_list[:30]
         except Exception as e:
             print(f'新浪获取失败: {e}')
             return []
